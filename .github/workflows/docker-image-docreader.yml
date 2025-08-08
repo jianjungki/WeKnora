@@ -15,7 +15,7 @@ jobs:
     steps:
     - uses: actions/checkout@v4
     - name: Build the Docker image
-      run: docker build . --file docker/Dockerfile.docreader --tag jianjungki/weknora-docreader:$(date +%s)
+      run: docker build . --file docker/Dockerfile.docreader --tag jianjungki/weknora-docreader:$(date +'%Y-%m-%d')
 
     # 设置 Docker Hub 凭据
     - name: Log in to Docker Hub
@@ -26,4 +26,4 @@ jobs:
 
     # 推送 Docker 镜像到 Docker Hub
     - name: Push Docker image for mineru_base
-      run: docker push docker.io/jianjungki/weknora-docreader:latest
+      run: docker push docker.io/jianjungki/weknora-docreader:$(date +'%Y-%m-%d')
