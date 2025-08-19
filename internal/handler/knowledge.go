@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 
 	"github.com/Tencent/WeKnora/internal/errors"
 	"github.com/Tencent/WeKnora/internal/logger"
@@ -115,11 +116,27 @@ func (h *KnowledgeHandler) CreateKnowledgeFromFile(c *gin.Context) {
 		logger.Infof(ctx, "Received file metadata: %v", metadata)
 	}
 
+	enableMultimodelForm := c.PostForm("enable_multimodel")
+	var enableMultimodel *bool
+	if enableMultimodelForm != "" {
+		parseBool, err := strconv.ParseBool(enableMultimodelForm)
+		if err != nil {
+			logger.Error(ctx, "Failed to parse enable_multimodel", err)
+			c.Error(errors.NewBadRequestError("Invalid enable_multimodel format").WithDetails(err.Error()))
+			return
+		}
+		enableMultimodel = &parseBool
+	}
+
 	// Create knowledge entry from the file
-	knowledge, err := h.kgService.CreateKnowledgeFromFile(ctx, kbID, file, metadata)
+	knowledge, err := h.kgService.CreateKnowledgeFromFile(ctx, kbID, file, metadata, enableMultimodel)
 	// Check for duplicate knowledge error
 	if err != nil {
 		if h.handleDuplicateKnowledgeError(c, err, knowledge, "file") {
+			return
+		}
+		if appErr, ok := errors.IsAppError(err); ok {
+			c.Error(appErr)
 			return
 		}
 		logger.ErrorWithFields(ctx, err, nil)
@@ -148,7 +165,8 @@ func (h *KnowledgeHandler) CreateKnowledgeFromURL(c *gin.Context) {
 
 	// Parse URL from request body
 	var req struct {
-		URL string `json:"url" binding:"required"`
+		URL              string `json:"url" binding:"required"`
+		EnableMultimodel *bool  `json:"enable_multimodel"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		logger.Error(ctx, "Failed to parse URL request", err)
@@ -160,7 +178,7 @@ func (h *KnowledgeHandler) CreateKnowledgeFromURL(c *gin.Context) {
 	logger.Infof(ctx, "Creating knowledge from URL, knowledge base ID: %s, URL: %s", kbID, req.URL)
 
 	// Create knowledge entry from the URL
-	knowledge, err := h.kgService.CreateKnowledgeFromURL(ctx, kbID, req.URL)
+	knowledge, err := h.kgService.CreateKnowledgeFromURL(ctx, kbID, req.URL, req.EnableMultimodel)
 	// Check for duplicate knowledge error
 	if err != nil {
 		if h.handleDuplicateKnowledgeError(c, err, knowledge, "url") {

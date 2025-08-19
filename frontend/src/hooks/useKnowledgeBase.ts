@@ -23,7 +23,7 @@ export default function () {
   });
   const getKnowled = (query = { page: 1, page_size: 35 }) => {
     getKnowledgeBase(query)
-      .then((result: object) => {
+      .then((result: any) => {
         let { data, total: totalResult } = result;
         let cardList_ = data.map((item) => {
             item["file_name"] = item.file_name.substring(
@@ -50,7 +50,7 @@ export default function () {
     cardList.value[index].isMore = false;
     moreIndex.value = -1;
     delKnowledgeDetails(item.id)
-      .then((result) => {
+      .then((result: any) => {
         if (result.success) {
           MessagePlugin.info("知识删除成功！");
           getKnowled();
@@ -76,17 +76,43 @@ export default function () {
         return;
       }
       uploadKnowledgeBase({ file })
-        .then((result) => {
+        .then((result: any) => {
           if (result.success) {
             MessagePlugin.info("上传成功！");
             getKnowled();
           } else {
-            MessagePlugin.error("上传失败！");
+            // 改进错误信息提取逻辑
+            let errorMessage = "上传失败！";
+            
+            // 优先从 error 对象中获取错误信息
+            if (result.error && result.error.message) {
+              errorMessage = result.error.message;
+            } else if (result.message) {
+              errorMessage = result.message;
+            }
+            
+            // 检查错误码，如果是重复文件则显示特定提示
+            if (result.code === 'duplicate_file' || (result.error && result.error.code === 'duplicate_file')) {
+              errorMessage = "文件已存在";
+            }
+            
+            MessagePlugin.error(errorMessage);
           }
           uploadInput.value.value = "";
         })
-        .catch((err) => {
-          MessagePlugin.error("上传失败！");
+        .catch((err: any) => {
+          // 改进 catch 中的错误处理
+          let errorMessage = "上传失败！";
+          
+          if (err.code === 'duplicate_file') {
+            errorMessage = "文件已存在";
+          } else if (err.error && err.error.message) {
+            errorMessage = err.error.message;
+          } else if (err.message) {
+            errorMessage = err.message;
+          }
+          
+          MessagePlugin.error(errorMessage);
           uploadInput.value.value = "";
         });
     } else {
@@ -101,7 +127,7 @@ export default function () {
       id: "",
     });
     getKnowledgeDetails(item.id)
-      .then((result) => {
+      .then((result: any) => {
         if (result.success && result.data) {
           let { data } = result;
           Object.assign(details, {
@@ -116,7 +142,7 @@ export default function () {
   };
   const getfDetails = (id, page) => {
     getKnowledgeDetailsCon(id, page)
-      .then((result) => {
+      .then((result: any) => {
         if (result.success && result.data) {
           let { data, total: totalResult } = result;
           if (page == 1) {

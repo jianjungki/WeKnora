@@ -21,19 +21,233 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
+// 对象存储提供方
+type StorageProvider int32
+
+const (
+	StorageProvider_STORAGE_PROVIDER_UNSPECIFIED StorageProvider = 0
+	StorageProvider_COS                          StorageProvider = 1 // 腾讯云 COS
+	StorageProvider_MINIO                        StorageProvider = 2 // MinIO/S3 兼容
+)
+
+// Enum value maps for StorageProvider.
+var (
+	StorageProvider_name = map[int32]string{
+		0: "STORAGE_PROVIDER_UNSPECIFIED",
+		1: "COS",
+		2: "MINIO",
+	}
+	StorageProvider_value = map[string]int32{
+		"STORAGE_PROVIDER_UNSPECIFIED": 0,
+		"COS":                          1,
+		"MINIO":                        2,
+	}
+)
+
+func (x StorageProvider) Enum() *StorageProvider {
+	p := new(StorageProvider)
+	*p = x
+	return p
+}
+
+func (x StorageProvider) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (StorageProvider) Descriptor() protoreflect.EnumDescriptor {
+	return file_docreader_proto_enumTypes[0].Descriptor()
+}
+
+func (StorageProvider) Type() protoreflect.EnumType {
+	return &file_docreader_proto_enumTypes[0]
+}
+
+func (x StorageProvider) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use StorageProvider.Descriptor instead.
+func (StorageProvider) EnumDescriptor() ([]byte, []int) {
+	return file_docreader_proto_rawDescGZIP(), []int{0}
+}
+
+// 通用对象存储配置，兼容 COS 与 MinIO
+type StorageConfig struct {
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	Provider        StorageProvider        `protobuf:"varint,1,opt,name=provider,proto3,enum=docreader.StorageProvider" json:"provider,omitempty"`        // 存储提供方
+	Region          string                 `protobuf:"bytes,2,opt,name=region,proto3" json:"region,omitempty"`                                            // 区域（COS 使用）
+	BucketName      string                 `protobuf:"bytes,3,opt,name=bucket_name,json=bucketName,proto3" json:"bucket_name,omitempty"`                  // 桶名
+	AccessKeyId     string                 `protobuf:"bytes,4,opt,name=access_key_id,json=accessKeyId,proto3" json:"access_key_id,omitempty"`             // 访问密钥 ID（MinIO/S3 使用）
+	SecretAccessKey string                 `protobuf:"bytes,5,opt,name=secret_access_key,json=secretAccessKey,proto3" json:"secret_access_key,omitempty"` // 访问密钥 Secret（MinIO/S3 使用）
+	AppId           string                 `protobuf:"bytes,6,opt,name=app_id,json=appId,proto3" json:"app_id,omitempty"`                                 // 应用 ID（COS 使用）
+	PathPrefix      string                 `protobuf:"bytes,7,opt,name=path_prefix,json=pathPrefix,proto3" json:"path_prefix,omitempty"`                  // 路径前缀
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
+}
+
+func (x *StorageConfig) Reset() {
+	*x = StorageConfig{}
+	mi := &file_docreader_proto_msgTypes[0]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *StorageConfig) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*StorageConfig) ProtoMessage() {}
+
+func (x *StorageConfig) ProtoReflect() protoreflect.Message {
+	mi := &file_docreader_proto_msgTypes[0]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use StorageConfig.ProtoReflect.Descriptor instead.
+func (*StorageConfig) Descriptor() ([]byte, []int) {
+	return file_docreader_proto_rawDescGZIP(), []int{0}
+}
+
+func (x *StorageConfig) GetProvider() StorageProvider {
+	if x != nil {
+		return x.Provider
+	}
+	return StorageProvider_STORAGE_PROVIDER_UNSPECIFIED
+}
+
+func (x *StorageConfig) GetRegion() string {
+	if x != nil {
+		return x.Region
+	}
+	return ""
+}
+
+func (x *StorageConfig) GetBucketName() string {
+	if x != nil {
+		return x.BucketName
+	}
+	return ""
+}
+
+func (x *StorageConfig) GetAccessKeyId() string {
+	if x != nil {
+		return x.AccessKeyId
+	}
+	return ""
+}
+
+func (x *StorageConfig) GetSecretAccessKey() string {
+	if x != nil {
+		return x.SecretAccessKey
+	}
+	return ""
+}
+
+func (x *StorageConfig) GetAppId() string {
+	if x != nil {
+		return x.AppId
+	}
+	return ""
+}
+
+func (x *StorageConfig) GetPathPrefix() string {
+	if x != nil {
+		return x.PathPrefix
+	}
+	return ""
+}
+
+// VLM 配置
+type VLMConfig struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	ModelName     string                 `protobuf:"bytes,1,opt,name=model_name,json=modelName,proto3" json:"model_name,omitempty"`             // VLM Model Name
+	BaseUrl       string                 `protobuf:"bytes,2,opt,name=base_url,json=baseUrl,proto3" json:"base_url,omitempty"`                   // VLM Base URL
+	ApiKey        string                 `protobuf:"bytes,3,opt,name=api_key,json=apiKey,proto3" json:"api_key,omitempty"`                      // VLM API Key
+	InterfaceType string                 `protobuf:"bytes,4,opt,name=interface_type,json=interfaceType,proto3" json:"interface_type,omitempty"` // VLM Interface Type: "ollama" or "openai"
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *VLMConfig) Reset() {
+	*x = VLMConfig{}
+	mi := &file_docreader_proto_msgTypes[1]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *VLMConfig) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*VLMConfig) ProtoMessage() {}
+
+func (x *VLMConfig) ProtoReflect() protoreflect.Message {
+	mi := &file_docreader_proto_msgTypes[1]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use VLMConfig.ProtoReflect.Descriptor instead.
+func (*VLMConfig) Descriptor() ([]byte, []int) {
+	return file_docreader_proto_rawDescGZIP(), []int{1}
+}
+
+func (x *VLMConfig) GetModelName() string {
+	if x != nil {
+		return x.ModelName
+	}
+	return ""
+}
+
+func (x *VLMConfig) GetBaseUrl() string {
+	if x != nil {
+		return x.BaseUrl
+	}
+	return ""
+}
+
+func (x *VLMConfig) GetApiKey() string {
+	if x != nil {
+		return x.ApiKey
+	}
+	return ""
+}
+
+func (x *VLMConfig) GetInterfaceType() string {
+	if x != nil {
+		return x.InterfaceType
+	}
+	return ""
+}
+
 type ReadConfig struct {
 	state            protoimpl.MessageState `protogen:"open.v1"`
 	ChunkSize        int32                  `protobuf:"varint,1,opt,name=chunk_size,json=chunkSize,proto3" json:"chunk_size,omitempty"`                      // 分块大小
 	ChunkOverlap     int32                  `protobuf:"varint,2,opt,name=chunk_overlap,json=chunkOverlap,proto3" json:"chunk_overlap,omitempty"`             // 分块重叠
 	Separators       []string               `protobuf:"bytes,3,rep,name=separators,proto3" json:"separators,omitempty"`                                      // 分隔符
 	EnableMultimodal bool                   `protobuf:"varint,4,opt,name=enable_multimodal,json=enableMultimodal,proto3" json:"enable_multimodal,omitempty"` // 多模态处理
+	StorageConfig    *StorageConfig         `protobuf:"bytes,5,opt,name=storage_config,json=storageConfig,proto3" json:"storage_config,omitempty"`           // 对象存储配置（通用）
+	VlmConfig        *VLMConfig             `protobuf:"bytes,6,opt,name=vlm_config,json=vlmConfig,proto3" json:"vlm_config,omitempty"`                       // VLM 配置
 	unknownFields    protoimpl.UnknownFields
 	sizeCache        protoimpl.SizeCache
 }
 
 func (x *ReadConfig) Reset() {
 	*x = ReadConfig{}
-	mi := &file_docreader_proto_msgTypes[0]
+	mi := &file_docreader_proto_msgTypes[2]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -45,7 +259,7 @@ func (x *ReadConfig) String() string {
 func (*ReadConfig) ProtoMessage() {}
 
 func (x *ReadConfig) ProtoReflect() protoreflect.Message {
-	mi := &file_docreader_proto_msgTypes[0]
+	mi := &file_docreader_proto_msgTypes[2]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -58,7 +272,7 @@ func (x *ReadConfig) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReadConfig.ProtoReflect.Descriptor instead.
 func (*ReadConfig) Descriptor() ([]byte, []int) {
-	return file_docreader_proto_rawDescGZIP(), []int{0}
+	return file_docreader_proto_rawDescGZIP(), []int{2}
 }
 
 func (x *ReadConfig) GetChunkSize() int32 {
@@ -89,6 +303,20 @@ func (x *ReadConfig) GetEnableMultimodal() bool {
 	return false
 }
 
+func (x *ReadConfig) GetStorageConfig() *StorageConfig {
+	if x != nil {
+		return x.StorageConfig
+	}
+	return nil
+}
+
+func (x *ReadConfig) GetVlmConfig() *VLMConfig {
+	if x != nil {
+		return x.VlmConfig
+	}
+	return nil
+}
+
 // 从文件读取文档请求
 type ReadFromFileRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -103,7 +331,7 @@ type ReadFromFileRequest struct {
 
 func (x *ReadFromFileRequest) Reset() {
 	*x = ReadFromFileRequest{}
-	mi := &file_docreader_proto_msgTypes[1]
+	mi := &file_docreader_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -115,7 +343,7 @@ func (x *ReadFromFileRequest) String() string {
 func (*ReadFromFileRequest) ProtoMessage() {}
 
 func (x *ReadFromFileRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docreader_proto_msgTypes[1]
+	mi := &file_docreader_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -128,7 +356,7 @@ func (x *ReadFromFileRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReadFromFileRequest.ProtoReflect.Descriptor instead.
 func (*ReadFromFileRequest) Descriptor() ([]byte, []int) {
-	return file_docreader_proto_rawDescGZIP(), []int{1}
+	return file_docreader_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *ReadFromFileRequest) GetFileContent() []byte {
@@ -179,7 +407,7 @@ type ReadFromURLRequest struct {
 
 func (x *ReadFromURLRequest) Reset() {
 	*x = ReadFromURLRequest{}
-	mi := &file_docreader_proto_msgTypes[2]
+	mi := &file_docreader_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -191,7 +419,7 @@ func (x *ReadFromURLRequest) String() string {
 func (*ReadFromURLRequest) ProtoMessage() {}
 
 func (x *ReadFromURLRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docreader_proto_msgTypes[2]
+	mi := &file_docreader_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -204,7 +432,7 @@ func (x *ReadFromURLRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReadFromURLRequest.ProtoReflect.Descriptor instead.
 func (*ReadFromURLRequest) Descriptor() ([]byte, []int) {
-	return file_docreader_proto_rawDescGZIP(), []int{2}
+	return file_docreader_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *ReadFromURLRequest) GetUrl() string {
@@ -250,7 +478,7 @@ type Image struct {
 
 func (x *Image) Reset() {
 	*x = Image{}
-	mi := &file_docreader_proto_msgTypes[3]
+	mi := &file_docreader_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -262,7 +490,7 @@ func (x *Image) String() string {
 func (*Image) ProtoMessage() {}
 
 func (x *Image) ProtoReflect() protoreflect.Message {
-	mi := &file_docreader_proto_msgTypes[3]
+	mi := &file_docreader_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -275,7 +503,7 @@ func (x *Image) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Image.ProtoReflect.Descriptor instead.
 func (*Image) Descriptor() ([]byte, []int) {
-	return file_docreader_proto_rawDescGZIP(), []int{3}
+	return file_docreader_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *Image) GetUrl() string {
@@ -333,7 +561,7 @@ type Chunk struct {
 
 func (x *Chunk) Reset() {
 	*x = Chunk{}
-	mi := &file_docreader_proto_msgTypes[4]
+	mi := &file_docreader_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -345,7 +573,7 @@ func (x *Chunk) String() string {
 func (*Chunk) ProtoMessage() {}
 
 func (x *Chunk) ProtoReflect() protoreflect.Message {
-	mi := &file_docreader_proto_msgTypes[4]
+	mi := &file_docreader_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -358,7 +586,7 @@ func (x *Chunk) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Chunk.ProtoReflect.Descriptor instead.
 func (*Chunk) Descriptor() ([]byte, []int) {
-	return file_docreader_proto_rawDescGZIP(), []int{4}
+	return file_docreader_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *Chunk) GetContent() string {
@@ -407,7 +635,7 @@ type ReadResponse struct {
 
 func (x *ReadResponse) Reset() {
 	*x = ReadResponse{}
-	mi := &file_docreader_proto_msgTypes[5]
+	mi := &file_docreader_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -419,7 +647,7 @@ func (x *ReadResponse) String() string {
 func (*ReadResponse) ProtoMessage() {}
 
 func (x *ReadResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_docreader_proto_msgTypes[5]
+	mi := &file_docreader_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -432,7 +660,7 @@ func (x *ReadResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReadResponse.ProtoReflect.Descriptor instead.
 func (*ReadResponse) Descriptor() ([]byte, []int) {
-	return file_docreader_proto_rawDescGZIP(), []int{5}
+	return file_docreader_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *ReadResponse) GetChunks() []*Chunk {
@@ -453,7 +681,23 @@ var File_docreader_proto protoreflect.FileDescriptor
 
 const file_docreader_proto_rawDesc = "" +
 	"\n" +
-	"\x0fdocreader.proto\x12\tdocreader\"\x9d\x01\n" +
+	"\x0fdocreader.proto\x12\tdocreader\"\x88\x02\n" +
+	"\rStorageConfig\x126\n" +
+	"\bprovider\x18\x01 \x01(\x0e2\x1a.docreader.StorageProviderR\bprovider\x12\x16\n" +
+	"\x06region\x18\x02 \x01(\tR\x06region\x12\x1f\n" +
+	"\vbucket_name\x18\x03 \x01(\tR\n" +
+	"bucketName\x12\"\n" +
+	"\raccess_key_id\x18\x04 \x01(\tR\vaccessKeyId\x12*\n" +
+	"\x11secret_access_key\x18\x05 \x01(\tR\x0fsecretAccessKey\x12\x15\n" +
+	"\x06app_id\x18\x06 \x01(\tR\x05appId\x12\x1f\n" +
+	"\vpath_prefix\x18\a \x01(\tR\n" +
+	"pathPrefix\"\x85\x01\n" +
+	"\tVLMConfig\x12\x1d\n" +
+	"\n" +
+	"model_name\x18\x01 \x01(\tR\tmodelName\x12\x19\n" +
+	"\bbase_url\x18\x02 \x01(\tR\abaseUrl\x12\x17\n" +
+	"\aapi_key\x18\x03 \x01(\tR\x06apiKey\x12%\n" +
+	"\x0einterface_type\x18\x04 \x01(\tR\rinterfaceType\"\x93\x02\n" +
 	"\n" +
 	"ReadConfig\x12\x1d\n" +
 	"\n" +
@@ -462,7 +706,10 @@ const file_docreader_proto_rawDesc = "" +
 	"\n" +
 	"separators\x18\x03 \x03(\tR\n" +
 	"separators\x12+\n" +
-	"\x11enable_multimodal\x18\x04 \x01(\bR\x10enableMultimodal\"\xc9\x01\n" +
+	"\x11enable_multimodal\x18\x04 \x01(\bR\x10enableMultimodal\x12?\n" +
+	"\x0estorage_config\x18\x05 \x01(\v2\x18.docreader.StorageConfigR\rstorageConfig\x123\n" +
+	"\n" +
+	"vlm_config\x18\x06 \x01(\v2\x14.docreader.VLMConfigR\tvlmConfig\"\xc9\x01\n" +
 	"\x13ReadFromFileRequest\x12!\n" +
 	"\ffile_content\x18\x01 \x01(\fR\vfileContent\x12\x1b\n" +
 	"\tfile_name\x18\x02 \x01(\tR\bfileName\x12\x1b\n" +
@@ -493,7 +740,11 @@ const file_docreader_proto_rawDesc = "" +
 	"\x06images\x18\x05 \x03(\v2\x10.docreader.ImageR\x06images\"N\n" +
 	"\fReadResponse\x12(\n" +
 	"\x06chunks\x18\x01 \x03(\v2\x10.docreader.ChunkR\x06chunks\x12\x14\n" +
-	"\x05error\x18\x02 \x01(\tR\x05error2\x9f\x01\n" +
+	"\x05error\x18\x02 \x01(\tR\x05error*G\n" +
+	"\x0fStorageProvider\x12 \n" +
+	"\x1cSTORAGE_PROVIDER_UNSPECIFIED\x10\x00\x12\a\n" +
+	"\x03COS\x10\x01\x12\t\n" +
+	"\x05MINIO\x10\x022\x9f\x01\n" +
 	"\tDocReader\x12I\n" +
 	"\fReadFromFile\x12\x1e.docreader.ReadFromFileRequest\x1a\x17.docreader.ReadResponse\"\x00\x12G\n" +
 	"\vReadFromURL\x12\x1d.docreader.ReadFromURLRequest\x1a\x17.docreader.ReadResponse\"\x00B5Z3github.com/Tencent/WeKnora/internal/docreader/protob\x06proto3"
@@ -510,29 +761,36 @@ func file_docreader_proto_rawDescGZIP() []byte {
 	return file_docreader_proto_rawDescData
 }
 
-var file_docreader_proto_msgTypes = make([]protoimpl.MessageInfo, 6)
+var file_docreader_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
+var file_docreader_proto_msgTypes = make([]protoimpl.MessageInfo, 8)
 var file_docreader_proto_goTypes = []any{
-	(*ReadConfig)(nil),          // 0: docreader.ReadConfig
-	(*ReadFromFileRequest)(nil), // 1: docreader.ReadFromFileRequest
-	(*ReadFromURLRequest)(nil),  // 2: docreader.ReadFromURLRequest
-	(*Image)(nil),               // 3: docreader.Image
-	(*Chunk)(nil),               // 4: docreader.Chunk
-	(*ReadResponse)(nil),        // 5: docreader.ReadResponse
+	(StorageProvider)(0),        // 0: docreader.StorageProvider
+	(*StorageConfig)(nil),       // 1: docreader.StorageConfig
+	(*VLMConfig)(nil),           // 2: docreader.VLMConfig
+	(*ReadConfig)(nil),          // 3: docreader.ReadConfig
+	(*ReadFromFileRequest)(nil), // 4: docreader.ReadFromFileRequest
+	(*ReadFromURLRequest)(nil),  // 5: docreader.ReadFromURLRequest
+	(*Image)(nil),               // 6: docreader.Image
+	(*Chunk)(nil),               // 7: docreader.Chunk
+	(*ReadResponse)(nil),        // 8: docreader.ReadResponse
 }
 var file_docreader_proto_depIdxs = []int32{
-	0, // 0: docreader.ReadFromFileRequest.read_config:type_name -> docreader.ReadConfig
-	0, // 1: docreader.ReadFromURLRequest.read_config:type_name -> docreader.ReadConfig
-	3, // 2: docreader.Chunk.images:type_name -> docreader.Image
-	4, // 3: docreader.ReadResponse.chunks:type_name -> docreader.Chunk
-	1, // 4: docreader.DocReader.ReadFromFile:input_type -> docreader.ReadFromFileRequest
-	2, // 5: docreader.DocReader.ReadFromURL:input_type -> docreader.ReadFromURLRequest
-	5, // 6: docreader.DocReader.ReadFromFile:output_type -> docreader.ReadResponse
-	5, // 7: docreader.DocReader.ReadFromURL:output_type -> docreader.ReadResponse
-	6, // [6:8] is the sub-list for method output_type
-	4, // [4:6] is the sub-list for method input_type
-	4, // [4:4] is the sub-list for extension type_name
-	4, // [4:4] is the sub-list for extension extendee
-	0, // [0:4] is the sub-list for field type_name
+	0, // 0: docreader.StorageConfig.provider:type_name -> docreader.StorageProvider
+	1, // 1: docreader.ReadConfig.storage_config:type_name -> docreader.StorageConfig
+	2, // 2: docreader.ReadConfig.vlm_config:type_name -> docreader.VLMConfig
+	3, // 3: docreader.ReadFromFileRequest.read_config:type_name -> docreader.ReadConfig
+	3, // 4: docreader.ReadFromURLRequest.read_config:type_name -> docreader.ReadConfig
+	6, // 5: docreader.Chunk.images:type_name -> docreader.Image
+	7, // 6: docreader.ReadResponse.chunks:type_name -> docreader.Chunk
+	4, // 7: docreader.DocReader.ReadFromFile:input_type -> docreader.ReadFromFileRequest
+	5, // 8: docreader.DocReader.ReadFromURL:input_type -> docreader.ReadFromURLRequest
+	8, // 9: docreader.DocReader.ReadFromFile:output_type -> docreader.ReadResponse
+	8, // 10: docreader.DocReader.ReadFromURL:output_type -> docreader.ReadResponse
+	9, // [9:11] is the sub-list for method output_type
+	7, // [7:9] is the sub-list for method input_type
+	7, // [7:7] is the sub-list for extension type_name
+	7, // [7:7] is the sub-list for extension extendee
+	0, // [0:7] is the sub-list for field type_name
 }
 
 func init() { file_docreader_proto_init() }
@@ -545,13 +803,14 @@ func file_docreader_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_docreader_proto_rawDesc), len(file_docreader_proto_rawDesc)),
-			NumEnums:      0,
-			NumMessages:   6,
+			NumEnums:      1,
+			NumMessages:   8,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
 		GoTypes:           file_docreader_proto_goTypes,
 		DependencyIndexes: file_docreader_proto_depIdxs,
+		EnumInfos:         file_docreader_proto_enumTypes,
 		MessageInfos:      file_docreader_proto_msgTypes,
 	}.Build()
 	File_docreader_proto = out.File

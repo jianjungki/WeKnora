@@ -1,18 +1,22 @@
 # -*- coding: utf-8 -*-
 import re
 import os
-import uuid
 import asyncio
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any, Optional, Tuple, Union
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 import logging
-from qcloud_cos import CosConfig, CosS3Client
 import sys
 import traceback
 import numpy as np
 import time
+import io
+import json
 from .ocr_engine import OCREngine
+from .image_utils import image_to_base64
+from .config import ChunkingConfig
+from .storage import create_storage
+from PIL import Image
 
 # Add parent directory to Python path for src imports
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -100,6 +104,7 @@ class BaseParser(ABC):
         max_image_size: int = 1920,  # Maximum image size
         max_concurrent_tasks: int = 5,  # Max concurrent tasks
         max_chunks: int = 1000,  # Max number of returned chunks
+        chunking_config: ChunkingConfig = None,  # Chunking configuration object
     ):
         """Initialize parser
 
@@ -116,6 +121,8 @@ class BaseParser(ABC):
             max_concurrent_tasks: Max concurrent tasks
             max_chunks: Max number of returned chunks
         """
+        # Storage client instance
+        self._storage = None
         self.file_name = file_name
         self.file_type = file_type or os.path.splitext(file_name)[1]
         self.enable_multimodal = enable_multimodal
@@ -127,6 +134,7 @@ class BaseParser(ABC):
         self.max_image_size = max_image_size
         self.max_concurrent_tasks = max_concurrent_tasks
         self.max_chunks = max_chunks
+        self.chunking_config = chunking_config
         
         logger.info(
             f"Initializing {self.__class__.__name__} for file: {file_name}, type: {self.file_type}"
@@ -141,7 +149,7 @@ class BaseParser(ABC):
         # Only initialize Caption service if multimodal is enabled
         if self.enable_multimodal:
             try:
-                self.caption_parser = Caption()
+                self.caption_parser = Caption(self.chunking_config.vlm_config)
             except Exception as e:
                 logger.warning(f"Failed to initialize Caption service: {str(e)}")
                 self.caption_parser = None
@@ -200,55 +208,51 @@ class BaseParser(ABC):
                 resized_image.close()
 
     def _resize_image_if_needed(self, image):
-        """Resize image to avoid processing large images
+        """Resize image if it exceeds maximum size limit
 
         Args:
             image: Image object (PIL.Image or numpy array)
 
         Returns:
-            Resized image
+            Resized image object
         """
         try:
-            # Check if it's a PIL.Image object
-            if hasattr(image, 'width') and hasattr(image, 'height'):
-                width, height = image.width, image.height
-                # Check if resizing is needed
+            # If it's a PIL Image
+            if hasattr(image, 'size'):
+                width, height = image.size
                 if width > self.max_image_size or height > self.max_image_size:
-                    logger.info(f"Resizing image, original size: {width}x{height}")
-                    # Calculate scaling factor
+                    logger.info(f"Resizing PIL image, original size: {width}x{height}")
                     scale = min(self.max_image_size / width, self.max_image_size / height)
                     new_width = int(width * scale)
                     new_height = int(height * scale)
-                    # Resize
                     resized_image = image.resize((new_width, new_height))
-                    logger.info(f"Image resized to: {new_width}x{new_height}")
+                    logger.info(f"Resized to: {new_width}x{new_height}")
                     return resized_image
+                else:
+                    logger.info(f"PIL image size {width}x{height} is within limits, no resizing needed")
+                    return image
             # If it's a numpy array
-            elif hasattr(image, 'shape') and len(image.shape) == 3:
-                height, width = image.shape[0], image.shape[1]
+            elif hasattr(image, 'shape'):
+                height, width = image.shape[:2]
                 if width > self.max_image_size or height > self.max_image_size:
                     logger.info(f"Resizing numpy image, original size: {width}x{height}")
-                    # Use PIL for resizing
-                    from PIL import Image
+                    scale = min(self.max_image_size / width, self.max_image_size / height)
+                    new_width = int(width * scale)
+                    new_height = int(height * scale)
+                    # Use PIL for resizing numpy arrays
                     pil_image = Image.fromarray(image)
-                    try:
-                        scale = min(self.max_image_size / width, self.max_image_size / height)
-                        new_width = int(width * scale)
-                        new_height = int(height * scale)
-                        resized_image = pil_image.resize((new_width, new_height))
-                        # Convert back to numpy array
-                        import numpy as np
-                        resized_array = np.array(resized_image)
-                        logger.info(f"numpy image resized to: {new_width}x{new_height}")
-                        return resized_array
-                    finally:
-                        # Ensure PIL image is closed
-                        pil_image.close()
-                        if 'resized_image' in locals() and hasattr(resized_image, 'close'):
-                            resized_image.close()
-            return image
+                    resized_pil = pil_image.resize((new_width, new_height))
+                    resized_image = np.array(resized_pil)
+                    logger.info(f"Resized to: {new_width}x{new_height}")
+                    return resized_image
+                else:
+                    logger.info(f"Numpy image size {width}x{height} is within limits, no resizing needed")
+                    return image
+            else:
+                logger.warning(f"Unknown image type: {type(image)}, cannot resize")
+                return image
         except Exception as e:
-            logger.warning(f"Failed to resize image: {str(e)}, using original image")
+            logger.error(f"Error resizing image: {str(e)}")
             return image
 
     def process_image(self, image, image_url=None):
@@ -273,15 +277,21 @@ class BaseParser(ABC):
         ocr_text = self.perform_ocr(image)
         caption = ""
 
-        if self.caption_parser and image_url:
+        if self.caption_parser:
             logger.info(f"OCR successfully extracted {len(ocr_text)} characters, continuing to get caption")
-            caption = self.get_image_caption(image_url)
-            if caption:
-                logger.info(f"Successfully obtained image caption: {caption}")
+            # Convert image to base64 for caption generation
+            img_base64 = image_to_base64(image)
+            if img_base64:
+                caption = self.get_image_caption(img_base64)
+                if caption:
+                    logger.info(f"Successfully obtained image caption: {caption}")
+                else:
+                    logger.warning("Failed to get caption")
             else:
-                logger.warning("Failed to get caption")
+                logger.warning("Failed to convert image to base64")
+                caption = ""
         else:
-            logger.info("image_url not provided or Caption service not initialized, skipping caption retrieval")
+            logger.info("Caption service not initialized, skipping caption retrieval")
 
         # Release image resources
         del image
@@ -323,21 +333,27 @@ class BaseParser(ABC):
 
             logger.info(f"OCR successfully extracted {len(ocr_text)} characters, continuing to get caption")
             caption = ""
-            if self.caption_parser and image_url:
+            if self.caption_parser:
                 try:
-                    # Add timeout to avoid blocking caption retrieval (30 seconds timeout)
-                    caption_task = self.get_image_caption_async(image_url)
-                    image_url, caption = await asyncio.wait_for(caption_task, timeout=30.0)
-                    if caption:
-                        logger.info(f"Successfully obtained image caption: {caption}")
+                    # Convert image to base64 for caption generation
+                    img_base64 = image_to_base64(resized_image)
+                    if img_base64:
+                        # Add timeout to avoid blocking caption retrieval (30 seconds timeout)
+                        caption_task = self.get_image_caption_async(img_base64)
+                        image_data, caption = await asyncio.wait_for(caption_task, timeout=30.0)
+                        if caption:
+                            logger.info(f"Successfully obtained image caption: {caption}")
+                        else:
+                            logger.warning("Failed to get caption")
                     else:
-                        logger.warning("Failed to get caption")
+                        logger.warning("Failed to convert image to base64")
+                        caption = ""
                 except asyncio.TimeoutError:
                     logger.warning("Caption retrieval timed out, skipping")
                 except Exception as e:
                     logger.error(f"Failed to get caption: {str(e)}")
             else:
-                logger.info("image_url not provided or Caption service not initialized, skipping caption retrieval")
+                logger.info("Caption service not initialized, skipping caption retrieval")
 
             return ocr_text, caption, image_url
         finally:
@@ -473,97 +489,53 @@ class BaseParser(ABC):
         logger.info(f"Decoded text length: {len(text)} characters")
         return text
 
-    def get_image_caption(self, image_url: str) -> str:
+    def get_image_caption(self, image_data: str) -> str:
         """Get image description
 
         Args:
-            image_url: Image URL
+            image_data: Image data (base64 encoded string or URL)
 
         Returns:
             Image description
         """
         start_time = time.time()
         logger.info(
-            f"Getting caption for image: {image_url[:250]}..."
-            if len(image_url) > 250
-            else f"Getting caption for image: {image_url}"
+            f"Getting caption for image: {image_data[:250]}..."
+            if len(image_data) > 250
+            else f"Getting caption for image: {image_data}"
         )
-        caption = self.caption_parser.get_caption(image_url)
+        caption = self.caption_parser.get_caption(image_data)
         if caption:
             logger.info(
-                f"Received caption of length: {len(caption)}, caption: {caption}, image_url: {image_url},"
+                f"Received caption of length: {len(caption)}, caption: {caption},"
                 f"cost: {time.time() - start_time} seconds"
             )
         else:
             logger.warning("Failed to get caption for image")
         return caption
 
-    async def get_image_caption_async(self, image_url: str) -> Tuple[str, str]:
+    async def get_image_caption_async(self, image_data: str) -> Tuple[str, str]:
         """Asynchronously get image description
 
         Args:
-            image_url: Image URL
+            image_data: Image data (base64 encoded string or URL)
 
         Returns:
-            Tuple[str, str]: Image URL and corresponding description
+            Tuple[str, str]: Image data and corresponding description
         """
-        caption = self.get_image_caption(image_url)
-        return image_url, caption
+        caption = self.get_image_caption(image_data)
+        return image_data, caption
 
-    def _init_cos_client(self):
-        """Initialize Tencent Cloud COS client"""
-        try:
-            # Get COS configuration from environment variables
-            secret_id = os.getenv("COS_SECRET_ID")
-            secret_key = os.getenv("COS_SECRET_KEY")
-            region = os.getenv("COS_REGION")
-            bucket_name = os.getenv("COS_BUCKET_NAME")
-            appid = os.getenv("COS_APP_ID")
-            prefix = os.getenv("COS_PATH_PREFIX")
-            enable_old_domain = (
-                os.getenv("COS_ENABLE_OLD_DOMAIN", "true").lower() == "true"
-            )
-
-            if not all([secret_id, secret_key, region, bucket_name, appid]):
-                logger.error(
-                    "Incomplete COS configuration, missing required environment variables"
-                )
-                return None, None, None, None
-
-            # Initialize COS configuration
-            logger.info(
-                f"Initializing COS client with region: {region}, bucket: {bucket_name}"
-            )
-            config = CosConfig(
-                Appid=appid,
-                Region=region,
-                SecretId=secret_id,
-                SecretKey=secret_key,
-                EnableOldDomain=enable_old_domain,
-            )
-
-            # Create client
-            client = CosS3Client(config)
-            return client, bucket_name, region, prefix
-        except Exception as e:
-            logger.error(f"Failed to initialize COS client: {str(e)}")
-            return None, None, None, None
-
-    def _get_file_url(self, bucket_name, region, object_key):
-        """Generate COS object URL
-
-        Args:
-            bucket_name: Bucket name
-            region: Region
-            object_key: Object key
-
-        Returns:
-            File URL
-        """
-        return f"https://{bucket_name}.cos.{region}.myqcloud.com/{object_key}"
+    def __init_storage(self):
+        """Initialize storage client based on configuration"""
+        if self._storage is None:
+            storage_config = self.chunking_config.storage_config if self.chunking_config else None
+            self._storage = create_storage(storage_config)
+            logger.info(f"Initialized storage client: {self._storage.__class__.__name__}")
+        return self._storage
 
     def upload_file(self, file_path: str) -> str:
-        """Upload file to Tencent Cloud COS
+        """Upload file to object storage
 
         Args:
             file_path: File path
@@ -571,83 +543,43 @@ class BaseParser(ABC):
         Returns:
             File URL
         """
-        logger.info(f"Uploading file to COS: {file_path}")
+        logger.info(f"Uploading file: {file_path}")
         try:
-            client, bucket_name, region, prefix = self._init_cos_client()
-            if not client:
-                return ""
-
-            # Generate object key, use UUID to avoid conflicts
-            file_name = os.path.basename(file_path)
-            object_key = (
-                f"{prefix}/images/{uuid.uuid4().hex}{os.path.splitext(file_name)[1]}"
-            )
-            logger.info(f"Generated object key: {object_key}")
-
-            # Upload file
-            logger.info("Attempting to upload file to COS")
-            response = client.upload_file(
-                Bucket=bucket_name, LocalFilePath=file_path, Key=object_key
-            )
-
-            # Get file URL
-            file_url = self._get_file_url(bucket_name, region, object_key)
-
-            logger.info(f"Successfully uploaded file to COS: {file_url}")
-            return file_url
-
+            storage = self.__init_storage()
+            return storage.upload_file(file_path)
         except Exception as e:
-            logger.error(f"Failed to upload file to COS: {str(e)}")
+            logger.error(f"Failed to upload file: {str(e)}")
             return ""
 
     def upload_bytes(self, content: bytes, file_ext: str = ".png") -> str:
-        """Directly upload file content to Tencent Cloud COS
+        """Upload bytes to object storage
 
         Args:
-            content: File byte content
-            file_ext: File extension, default is .png
+            content: Byte content to upload
+            file_ext: File extension
 
         Returns:
             File URL
         """
-        logger.info(
-            f"Uploading bytes content to COS, content size: {len(content)} bytes"
-        )
+        logger.info(f"Uploading bytes content, size: {len(content)} bytes")
         try:
-            client, bucket_name, region, prefix = self._init_cos_client()
-            if not client:
-                return ""
-
-            # Generate object key, use UUID to avoid conflicts
-            object_key = f"{prefix}/images/{uuid.uuid4().hex}{file_ext}"
-            logger.info(f"Generated object key: {object_key}")
-
-            # Directly upload file content
-            logger.info("Attempting to upload bytes content to COS")
-            response = client.put_object(
-                Bucket=bucket_name, Body=content, Key=object_key
-            )
-
-            # Get file URL
-            file_url = self._get_file_url(bucket_name, region, object_key)
-
-            logger.info(f"Successfully uploaded bytes to COS: {file_url}")
-            return file_url
-
+            storage = self.__init_storage()
+            return storage.upload_bytes(content, file_ext)
         except Exception as e:
-            logger.error(f"Failed to upload bytes to COS: {str(e)}")
+            logger.error(f"Failed to upload bytes to storage: {str(e)}")
             traceback.print_exc()
             return ""
 
     @abstractmethod
-    def parse_into_text(self, content: bytes) -> str:
+    def parse_into_text(self, content: bytes) -> Union[str, Tuple[str, Dict[str, Any]]]:
         """Parse document content
 
         Args:
             content: Document content
 
         Returns:
-            Parse result
+            Either a string containing the parsed text, or a tuple of (text, image_map)
+            where image_map is a dict mapping image URLs to Image objects
         """
         pass
 
@@ -663,7 +595,12 @@ class BaseParser(ABC):
         logger.info(
             f"Parsing document with {self.__class__.__name__}, content size: {len(content)} bytes"
         )
-        text = self.parse_into_text(content)
+        parse_result = self.parse_into_text(content)
+        if isinstance(parse_result, tuple):
+            text, image_map = parse_result
+        else:
+            text = parse_result
+            image_map = {}
         logger.info(f"Extracted {len(text)} characters of text from {self.file_name}")
         logger.info(f"Beginning chunking process for text")
         chunks = self.chunk_text(text)
@@ -698,7 +635,7 @@ class BaseParser(ABC):
             
             if file_ext in allowed_types:
                 logger.info(f"Processing images in each chunk for file type: {file_ext}")
-                chunks = self.process_chunks_images(chunks)
+                chunks = self.process_chunks_images(chunks, image_map)
             else:
                 logger.info(f"Skipping image processing for unsupported file type: {file_ext}")
             
@@ -1026,15 +963,16 @@ class BaseParser(ABC):
             
         return images_info
 
-    async def download_and_upload_image(self, img_url: str, current_request_id=None):
-        """Download image and upload to COS, if it's already a COS path or local path, use directly
+    async def download_and_upload_image(self, img_url: str, current_request_id=None, image_map=None):
+        """Download image and upload to object storage, if it's already an object storage path or local path, use directly
 
         Args:
             img_url: Image URL or local path
             current_request_id: Current request ID
+            image_map: Optional dictionary mapping image URLs to Image objects
 
         Returns:
-            tuple: (original URL, COS URL, image object), if failed returns (original URL, None, None)
+            tuple: (original URL, storage URL, image object), if failed returns (original URL, None, None)
         """
         # Set request ID context in the asynchronous task
         try:
@@ -1050,8 +988,14 @@ class BaseParser(ABC):
             from PIL import Image
             import io
             
-            # Check if it's already a COS path
-            if "cos" in img_url and "myqcloud.com" in img_url:
+            # Check if image is already in the image_map
+            if image_map and img_url in image_map:
+                logger.info(f"Image already in image_map: {img_url}, using cached object")
+                return img_url, img_url, image_map[img_url]
+                
+            # Check if it's already a storage URL (COS or MinIO)
+            is_storage_url = any(pattern in img_url for pattern in ["cos", "myqcloud.com", "minio", ".s3."])
+            if is_storage_url:
                 logger.info(f"Image already on COS: {img_url}, no need to re-upload")
                 try:
                     # Still need to get image object for OCR processing
@@ -1074,10 +1018,10 @@ class BaseParser(ABC):
                             # Image will be closed by the caller
                             pass
                     else:
-                        logger.warning(f"Failed to get COS image: {response.status_code}")
+                        logger.warning(f"Failed to get storage image: {response.status_code}")
                         return img_url, img_url, None
                 except Exception as e:
-                    logger.error(f"Error getting COS image: {str(e)}")
+                    logger.error(f"Error getting storage image: {str(e)}")
                     return img_url, img_url, None
             
             # Check if it's a local file path
@@ -1087,12 +1031,12 @@ class BaseParser(ABC):
                 try:
                     # Read local image
                     image = Image.open(img_url)
-                    # Upload to COS
+                    # Upload to storage
                     with open(img_url, 'rb') as f:
                         content = f.read()
-                    cos_url = self.upload_bytes(content)
-                    logger.info(f"Successfully uploaded local image to COS: {cos_url}")
-                    return img_url, cos_url, image
+                    storage_url = self.upload_bytes(content)
+                    logger.info(f"Successfully uploaded local image to storage: {storage_url}")
+                    return img_url, storage_url, image
                 except Exception as e:
                     logger.error(f"Error processing local image: {str(e)}")
                     if image and hasattr(image, 'close'):
@@ -1117,10 +1061,10 @@ class BaseParser(ABC):
                     # Download successful, create image object
                     image = Image.open(io.BytesIO(response.content))
                     try:
-                        # Upload to COS using the method in BaseParser
-                        cos_url = self.upload_bytes(response.content)
-                        logger.info(f"Successfully uploaded image to COS: {cos_url}")
-                        return img_url, cos_url, image
+                        # Upload to storage using the method in BaseParser
+                        storage_url = self.upload_bytes(response.content)
+                        logger.info(f"Successfully uploaded image to storage: {storage_url}")
+                        return img_url, storage_url, image
                     finally:
                         # Image will be closed by the caller
                         pass
@@ -1132,7 +1076,7 @@ class BaseParser(ABC):
             logger.error(f"Error downloading or processing image: {str(e)}")
             return img_url, None, None
 
-    async def process_chunk_images_async(self, chunk, chunk_idx, total_chunks, current_request_id=None):
+    async def process_chunk_images_async(self, chunk, chunk_idx, total_chunks, current_request_id=None, image_map=None):
         """Asynchronously process images in a single Chunk
 
         Args:
@@ -1174,7 +1118,7 @@ class BaseParser(ABC):
         loop = asyncio.get_event_loop()
         
         # Concurrent download and upload of images
-        tasks = [self.download_and_upload_image(url, current_request_id) for url in url_to_info_map.keys()]
+        tasks = [self.download_and_upload_image(url, current_request_id, image_map) for url in url_to_info_map.keys()]
         results = await asyncio.gather(*tasks)
         
         # Process download results, prepare for OCR processing
@@ -1221,7 +1165,7 @@ class BaseParser(ABC):
         logger.info(f"Completed image processing in Chunk #{chunk_idx+1}")
         return chunk
 
-    def process_chunks_images(self, chunks: List[Chunk]) -> List[Chunk]:
+    def process_chunks_images(self, chunks: List[Chunk], image_map=None) -> List[Chunk]:
         """Concurrent processing of images in all Chunks
 
         Args:
@@ -1255,7 +1199,7 @@ class BaseParser(ABC):
             async def process_with_limit(chunk, idx, total):
                 """Use semaphore to control concurrent processing of Chunks"""
                 async with semaphore:
-                    return await self.process_chunk_images_async(chunk, idx, total, current_request_id)
+                    return await self.process_chunk_images_async(chunk, idx, total, current_request_id, image_map)
             
             # Create tasks for all Chunks
             tasks = [

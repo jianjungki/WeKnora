@@ -12,11 +12,39 @@ service DocReader {
   rpc ReadFromURL(ReadFromURLRequest) returns (ReadResponse) {}
 }
 
+// 对象存储提供方
+enum StorageProvider {
+  STORAGE_PROVIDER_UNSPECIFIED = 0;
+  COS = 1;     // 腾讯云 COS
+  MINIO = 2;   // MinIO/S3 兼容
+}
+
+// 通用对象存储配置，兼容 COS 与 MinIO
+message StorageConfig {
+  StorageProvider provider = 1;   // 存储提供方
+  string region = 2;              // 区域（COS 使用）
+  string bucket_name = 3;         // 桶名
+  string access_key_id = 4;       // 访问密钥 ID（MinIO/S3 使用）
+  string secret_access_key = 5;   // 访问密钥 Secret（MinIO/S3 使用）
+  string app_id = 6;              // 应用 ID（COS 使用）
+  string path_prefix = 7;         // 路径前缀
+}
+
+// VLM 配置
+message VLMConfig {
+  string model_name = 1;     // VLM Model Name
+  string base_url = 2;       // VLM Base URL
+  string api_key = 3;        // VLM API Key
+  string interface_type = 4; // VLM Interface Type: "ollama" or "openai"
+}
+
 message ReadConfig {
   int32 chunk_size = 1;    // 分块大小
   int32 chunk_overlap = 2; // 分块重叠
   repeated string separators = 3;    // 分隔符
   bool enable_multimodal = 4; // 多模态处理
+  StorageConfig storage_config = 5;   // 对象存储配置（通用）
+  VLMConfig vlm_config = 6;   // VLM 配置
 }
 
 // 从文件读取文档请求

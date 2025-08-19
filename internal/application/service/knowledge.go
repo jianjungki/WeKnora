@@ -19,6 +19,7 @@ import (
 
 	"github.com/Tencent/WeKnora/internal/application/service/retriever"
 	"github.com/Tencent/WeKnora/internal/config"
+	werrors "github.com/Tencent/WeKnora/internal/errors"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/models/chat"
 	"github.com/Tencent/WeKnora/internal/models/utils"
@@ -29,6 +30,7 @@ import (
 	"github.com/Tencent/WeKnora/services/docreader/src/proto"
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/attribute"
+	"golang.org/x/sync/errgroup"
 )
 
 // Error definitions for knowledge service operations
@@ -43,6 +45,8 @@ var (
 	ErrDuplicateFile = errors.New("file already exists")
 	// ErrDuplicateURL is returned when trying to add a URL that already exists
 	ErrDuplicateURL = errors.New("URL already exists")
+	// ErrImageNotParse is returned when trying to update image information without enabling multimodel
+	ErrImageNotParse = errors.New("image not parse without enable multimodel")
 )
 
 // knowledgeService implements the knowledge service interface
@@ -86,7 +90,7 @@ func NewKnowledgeService(
 
 // CreateKnowledgeFromFile creates a knowledge entry from an uploaded file
 func (s *knowledgeService) CreateKnowledgeFromFile(ctx context.Context,
-	kbID string, file *multipart.FileHeader, metadata map[string]string,
+	kbID string, file *multipart.FileHeader, metadata map[string]string, enableMultimodel *bool,
 ) (*types.Knowledge, error) {
 	logger.Info(ctx, "Start creating knowledge from file")
 	logger.Infof(ctx, "Knowledge base ID: %s, file: %s", kbID, file.Filename)
@@ -100,6 +104,36 @@ func (s *knowledgeService) CreateKnowledgeFromFile(ctx context.Context,
 	if err != nil {
 		logger.Errorf(ctx, "Failed to get knowledge base: %v", err)
 		return nil, err
+	}
+
+	// 检查多模态配置完整性 - 只在图片文件时校验
+	// 检查是否为图片文件
+	if !IsImageType(getFileType(file.Filename)) {
+		logger.Info(ctx, "Non-image file with multimodal enabled, skipping COS/VLM validation")
+	} else {
+		// 检查COS配置
+		switch kb.StorageConfig.Provider {
+		case "cos":
+			if kb.StorageConfig.SecretID == "" || kb.StorageConfig.SecretKey == "" ||
+				kb.StorageConfig.Region == "" || kb.StorageConfig.BucketName == "" ||
+				kb.StorageConfig.AppID == "" {
+				logger.Error(ctx, "COS configuration incomplete for image multimodal processing")
+				return nil, werrors.NewBadRequestError("上传图片文件需要完整的对象存储配置信息, 请前往系统设置页面进行补全")
+			}
+		case "minio":
+			if kb.StorageConfig.BucketName == "" {
+				logger.Error(ctx, "MinIO configuration incomplete for image multimodal processing")
+				return nil, werrors.NewBadRequestError("上传图片文件需要完整的对象存储配置信息, 请前往系统设置页面进行补全")
+			}
+		}
+
+		// 检查VLM配置
+		if kb.VLMConfig.ModelName == "" || kb.VLMConfig.BaseURL == "" {
+			logger.Error(ctx, "VLM configuration incomplete for image multimodal processing")
+			return nil, werrors.NewBadRequestError("上传图片文件需要完整的VLM配置信息, 请前往系统设置页面进行补全")
+		}
+
+		logger.Info(ctx, "Image multimodal configuration validation passed")
 	}
 
 	// Validate file type
@@ -203,7 +237,10 @@ func (s *knowledgeService) CreateKnowledgeFromFile(ctx context.Context,
 	// Process document asynchronously
 	logger.Info(ctx, "Starting asynchronous document processing")
 	newCtx := logger.CloneContext(ctx)
-	go s.processDocument(newCtx, kb, knowledge, file)
+	if enableMultimodel == nil {
+		enableMultimodel = &kb.ChunkingConfig.EnableMultimodal
+	}
+	go s.processDocument(newCtx, kb, knowledge, file, *enableMultimodel)
 
 	logger.Infof(ctx, "Knowledge from file created successfully, ID: %s", knowledge.ID)
 	return knowledge, nil
@@ -211,7 +248,7 @@ func (s *knowledgeService) CreateKnowledgeFromFile(ctx context.Context,
 
 // CreateKnowledgeFromURL creates a knowledge entry from a URL source
 func (s *knowledgeService) CreateKnowledgeFromURL(ctx context.Context,
-	kbID string, url string,
+	kbID string, url string, enableMultimodel *bool,
 ) (*types.Knowledge, error) {
 	logger.Info(ctx, "Start creating knowledge from URL")
 	logger.Infof(ctx, "Knowledge base ID: %s, URL: %s", kbID, url)
@@ -285,7 +322,11 @@ func (s *knowledgeService) CreateKnowledgeFromURL(ctx context.Context,
 
 	// Process URL asynchronously
 	logger.Info(ctx, "Starting asynchronous URL processing")
-	go s.processDocumentFromURL(ctx, kb, knowledge, url)
+	if enableMultimodel == nil {
+		enableMultimodel = &kb.ChunkingConfig.EnableMultimodal
+	}
+	newCtx := logger.CloneContext(ctx)
+	go s.processDocumentFromURL(newCtx, kb, knowledge, url, *enableMultimodel)
 
 	logger.Infof(ctx, "Knowledge from URL created successfully, ID: %s", knowledge.ID)
 	return knowledge, nil
@@ -383,33 +424,53 @@ func (s *knowledgeService) DeleteKnowledge(ctx context.Context, id string) error
 	if err != nil {
 		return err
 	}
+	wg := errgroup.Group{}
 	// Delete knowledge embeddings from vector store
-	tenantInfo := ctx.Value(types.TenantInfoContextKey).(*types.Tenant)
-	retrieveEngine, err := retriever.NewCompositeRetrieveEngine(tenantInfo.RetrieverEngines.Engines)
-	if err != nil {
-		logger.GetLogger(ctx).WithField("error", err).Errorf("DeleteKnowledge delete knowledge embedding failed")
-	}
-	embeddingModel, err := s.modelService.GetEmbeddingModel(ctx, knowledge.EmbeddingModelID)
-	if err != nil {
-		logger.GetLogger(ctx).WithField("error", err).Errorf("DeleteKnowledge delete knowledge embedding failed")
-	}
-
-	if err := retrieveEngine.DeleteByKnowledgeIDList(ctx, []string{id}, embeddingModel.GetDimensions()); err != nil {
-		logger.GetLogger(ctx).WithField("error", err).Errorf("DeleteKnowledge delete knowledge embedding failed")
-	}
-	// Delete all chunks associated with this knowledge
-	if err := s.chunkService.DeleteChunksByKnowledgeID(ctx, id); err != nil {
-		logger.GetLogger(ctx).WithField("error", err).Errorf("DeleteKnowledge delete chunks failed")
-	}
-	// Delete the physical file if it exists
-	if knowledge.FilePath != "" {
-		if err := s.fileSvc.DeleteFile(ctx, knowledge.FilePath); err != nil {
-			logger.GetLogger(ctx).WithField("error", err).Errorf("DeleteKnowledge delete file failed")
+	wg.Go(func() error {
+		tenantInfo := ctx.Value(types.TenantInfoContextKey).(*types.Tenant)
+		retrieveEngine, err := retriever.NewCompositeRetrieveEngine(tenantInfo.RetrieverEngines.Engines)
+		if err != nil {
+			logger.GetLogger(ctx).WithField("error", err).Errorf("DeleteKnowledge delete knowledge embedding failed")
+			return err
 		}
-	}
-	tenantInfo.StorageUsed -= knowledge.StorageSize
-	if err := s.tenantRepo.AdjustStorageUsed(ctx, tenantInfo.ID, -knowledge.StorageSize); err != nil {
-		logger.GetLogger(ctx).WithField("error", err).Errorf("DeleteKnowledge update tenant storage used failed")
+		embeddingModel, err := s.modelService.GetEmbeddingModel(ctx, knowledge.EmbeddingModelID)
+		if err != nil {
+			logger.GetLogger(ctx).WithField("error", err).Errorf("DeleteKnowledge delete knowledge embedding failed")
+			return err
+		}
+		if err := retrieveEngine.DeleteByKnowledgeIDList(ctx, []string{knowledge.ID}, embeddingModel.GetDimensions()); err != nil {
+			logger.GetLogger(ctx).WithField("error", err).Errorf("DeleteKnowledge delete knowledge embedding failed")
+			return err
+		}
+		return nil
+	})
+
+	// Delete all chunks associated with this knowledge
+	wg.Go(func() error {
+		if err := s.chunkService.DeleteChunksByKnowledgeID(ctx, knowledge.ID); err != nil {
+			logger.GetLogger(ctx).WithField("error", err).Errorf("DeleteKnowledge delete chunks failed")
+			return err
+		}
+		return nil
+	})
+
+	// Delete the physical file if it exists
+	wg.Go(func() error {
+		if knowledge.FilePath != "" {
+			if err := s.fileSvc.DeleteFile(ctx, knowledge.FilePath); err != nil {
+				logger.GetLogger(ctx).WithField("error", err).Errorf("DeleteKnowledge delete file failed")
+			}
+		}
+		tenantInfo := ctx.Value(types.TenantInfoContextKey).(*types.Tenant)
+		tenantInfo.StorageUsed -= knowledge.StorageSize
+		if err := s.tenantRepo.AdjustStorageUsed(ctx, tenantInfo.ID, -knowledge.StorageSize); err != nil {
+			logger.GetLogger(ctx).WithField("error", err).Errorf("DeleteKnowledge update tenant storage used failed")
+		}
+		return nil
+	})
+
+	if err = wg.Wait(); err != nil {
+		return err
 	}
 	// Delete the knowledge entry itself from the database
 	return s.repo.DeleteKnowledge(ctx, ctx.Value(types.TenantIDContextKey).(uint), id)
@@ -420,55 +481,70 @@ func (s *knowledgeService) DeleteKnowledgeList(ctx context.Context, ids []string
 	if len(ids) == 0 {
 		return nil
 	}
-	tenantInfo := ctx.Value(types.TenantInfoContextKey).(*types.Tenant)
 	// 1. Get the knowledge entry
+	tenantInfo := ctx.Value(types.TenantInfoContextKey).(*types.Tenant)
 	knowledgeList, err := s.repo.GetKnowledgeBatch(ctx, tenantInfo.ID, ids)
 	if err != nil {
 		return err
 	}
 
+	wg := errgroup.Group{}
 	// 2. Delete knowledge embeddings from vector store
-	retrieveEngine, err := retriever.NewCompositeRetrieveEngine(tenantInfo.RetrieverEngines.Engines)
-	if err != nil {
-		logger.GetLogger(ctx).WithField("error", err).Errorf("DeleteKnowledge delete knowledge embedding failed")
-		return err
-	}
-	group := map[string][]string{}
-	for _, knowledge := range knowledgeList {
-		group[knowledge.EmbeddingModelID] = append(group[knowledge.EmbeddingModelID], knowledge.ID)
-	}
-	for embeddingModelID, knowledgeList := range group {
-		embeddingModel, err := s.modelService.GetEmbeddingModel(ctx, embeddingModelID)
+	wg.Go(func() error {
+		tenantInfo := ctx.Value(types.TenantInfoContextKey).(*types.Tenant)
+		retrieveEngine, err := retriever.NewCompositeRetrieveEngine(tenantInfo.RetrieverEngines.Engines)
 		if err != nil {
-			logger.GetLogger(ctx).WithField("error", err).Errorf("DeleteKnowledge get embedding model failed")
-			continue
-		}
-		if err := retrieveEngine.DeleteByKnowledgeIDList(ctx, knowledgeList, embeddingModel.GetDimensions()); err != nil {
 			logger.GetLogger(ctx).WithField("error", err).Errorf("DeleteKnowledge delete knowledge embedding failed")
-			continue
+			return err
 		}
-	}
-
-	// 3. Delete all chunks associated with this knowledge
-	if err := s.chunkService.DeleteByKnowledgeList(ctx, ids); err != nil {
-		logger.GetLogger(ctx).WithField("error", err).Errorf("DeleteKnowledge delete chunks failed")
-	}
-
-	// 4. Delete the physical file if it exists
-	storageAdjust := int64(0)
-	for _, knowledge := range knowledgeList {
-		if knowledge.FilePath != "" {
-			if err := s.fileSvc.DeleteFile(ctx, knowledge.FilePath); err != nil {
-				logger.GetLogger(ctx).WithField("error", err).Errorf("DeleteKnowledge delete file failed")
+		group := map[string][]string{}
+		for _, knowledge := range knowledgeList {
+			group[knowledge.EmbeddingModelID] = append(group[knowledge.EmbeddingModelID], knowledge.ID)
+		}
+		for embeddingModelID, knowledgeList := range group {
+			embeddingModel, err := s.modelService.GetEmbeddingModel(ctx, embeddingModelID)
+			if err != nil {
+				logger.GetLogger(ctx).WithField("error", err).Errorf("DeleteKnowledge get embedding model failed")
+				return err
+			}
+			if err := retrieveEngine.DeleteByKnowledgeIDList(ctx, knowledgeList, embeddingModel.GetDimensions()); err != nil {
+				logger.GetLogger(ctx).WithField("error", err).Errorf("DeleteKnowledge delete knowledge embedding failed")
+				return err
 			}
 		}
-		storageAdjust -= knowledge.StorageSize
-	}
-	tenantInfo.StorageUsed += storageAdjust
-	if err := s.tenantRepo.AdjustStorageUsed(ctx, tenantInfo.ID, storageAdjust); err != nil {
-		logger.GetLogger(ctx).WithField("error", err).Errorf("DeleteKnowledge update tenant storage used failed")
-	}
+		return nil
+	})
 
+	// 3. Delete all chunks associated with this knowledge
+	wg.Go(func() error {
+		if err := s.chunkService.DeleteByKnowledgeList(ctx, ids); err != nil {
+			logger.GetLogger(ctx).WithField("error", err).Errorf("DeleteKnowledge delete chunks failed")
+			return err
+		}
+		return nil
+	})
+
+	// 4. Delete the physical file if it exists
+	wg.Go(func() error {
+		storageAdjust := int64(0)
+		for _, knowledge := range knowledgeList {
+			if knowledge.FilePath != "" {
+				if err := s.fileSvc.DeleteFile(ctx, knowledge.FilePath); err != nil {
+					logger.GetLogger(ctx).WithField("error", err).Errorf("DeleteKnowledge delete file failed")
+				}
+			}
+			storageAdjust -= knowledge.StorageSize
+		}
+		tenantInfo.StorageUsed += storageAdjust
+		if err := s.tenantRepo.AdjustStorageUsed(ctx, tenantInfo.ID, storageAdjust); err != nil {
+			logger.GetLogger(ctx).WithField("error", err).Errorf("DeleteKnowledge update tenant storage used failed")
+		}
+		return nil
+	})
+
+	if err = wg.Wait(); err != nil {
+		return err
+	}
 	// 5. Delete the knowledge entry itself from the database
 	return s.repo.DeleteKnowledgeList(ctx, tenantInfo.ID, ids)
 }
@@ -531,8 +607,10 @@ func (s *knowledgeService) cloneKnowledge(ctx context.Context, src *types.Knowle
 
 // processDocument handles asynchronous processing of document files
 func (s *knowledgeService) processDocument(ctx context.Context,
-	kb *types.KnowledgeBase, knowledge *types.Knowledge, file *multipart.FileHeader,
+	kb *types.KnowledgeBase, knowledge *types.Knowledge, file *multipart.FileHeader, enableMultimodel bool,
 ) {
+	logger.GetLogger(ctx).Infof("processDocument enableMultimodel: %v", enableMultimodel)
+
 	ctx, span := tracing.ContextWithSpan(ctx, "knowledgeService.processDocument")
 	defer span.End()
 	span.SetAttributes(
@@ -545,7 +623,17 @@ func (s *knowledgeService) processDocument(ctx context.Context,
 		attribute.String("file_path", knowledge.FilePath),
 		attribute.Int64("file_size", knowledge.FileSize),
 		attribute.String("embedding_model", knowledge.EmbeddingModelID),
+		attribute.Bool("enable_multimodal", enableMultimodel),
 	)
+	if !enableMultimodel && IsImageType(knowledge.FileType) {
+		logger.GetLogger(ctx).WithField("knowledge_id", knowledge.ID).
+			WithField("error", ErrImageNotParse).Errorf("processDocument image without enable multimodel")
+		knowledge.ParseStatus = "failed"
+		knowledge.ErrorMessage = ErrImageNotParse.Error()
+		s.repo.UpdateKnowledge(ctx, knowledge)
+		span.RecordError(ErrImageNotParse)
+		return
+	}
 
 	// Update status to processing
 	knowledge.ParseStatus = "processing"
@@ -590,7 +678,22 @@ func (s *knowledgeService) processDocument(ctx context.Context,
 			ChunkSize:        int32(kb.ChunkingConfig.ChunkSize),
 			ChunkOverlap:     int32(kb.ChunkingConfig.ChunkOverlap),
 			Separators:       kb.ChunkingConfig.Separators,
-			EnableMultimodal: kb.ChunkingConfig.EnableMultimodal,
+			EnableMultimodal: enableMultimodel,
+			StorageConfig: &proto.StorageConfig{
+				Provider:        proto.StorageProvider(proto.StorageProvider_value[strings.ToUpper(kb.StorageConfig.Provider)]),
+				Region:          kb.StorageConfig.Region,
+				BucketName:      kb.StorageConfig.BucketName,
+				AccessKeyId:     kb.StorageConfig.SecretID,
+				SecretAccessKey: kb.StorageConfig.SecretKey,
+				AppId:           kb.StorageConfig.AppID,
+				PathPrefix:      kb.StorageConfig.PathPrefix,
+			},
+			VlmConfig: &proto.VLMConfig{
+				ModelName:     kb.VLMConfig.ModelName,
+				BaseUrl:       kb.VLMConfig.BaseURL,
+				ApiKey:        kb.VLMConfig.APIKey,
+				InterfaceType: kb.VLMConfig.InterfaceType,
+			},
 		},
 		RequestId: ctx.Value(types.RequestIDContextKey).(string),
 	})
@@ -612,7 +715,7 @@ func (s *knowledgeService) processDocument(ctx context.Context,
 
 // processDocumentFromURL handles asynchronous processing of URL content
 func (s *knowledgeService) processDocumentFromURL(ctx context.Context,
-	kb *types.KnowledgeBase, knowledge *types.Knowledge, url string,
+	kb *types.KnowledgeBase, knowledge *types.Knowledge, url string, enableMultimodel bool,
 ) {
 	// Update status to processing
 	knowledge.ParseStatus = "processing"
@@ -620,6 +723,7 @@ func (s *knowledgeService) processDocumentFromURL(ctx context.Context,
 	if err := s.repo.UpdateKnowledge(ctx, knowledge); err != nil {
 		return
 	}
+	logger.GetLogger(ctx).Infof("processDocumentFromURL enableMultimodel: %v", enableMultimodel)
 
 	// Fetch and chunk content from URL
 	resp, err := s.docReaderClient.ReadFromURL(ctx, &proto.ReadFromURLRequest{
@@ -629,7 +733,22 @@ func (s *knowledgeService) processDocumentFromURL(ctx context.Context,
 			ChunkSize:        int32(kb.ChunkingConfig.ChunkSize),
 			ChunkOverlap:     int32(kb.ChunkingConfig.ChunkOverlap),
 			Separators:       kb.ChunkingConfig.Separators,
-			EnableMultimodal: kb.ChunkingConfig.EnableMultimodal,
+			EnableMultimodal: enableMultimodel,
+			StorageConfig: &proto.StorageConfig{
+				Provider:        proto.StorageProvider(proto.StorageProvider_value[strings.ToUpper(kb.StorageConfig.Provider)]),
+				Region:          kb.StorageConfig.Region,
+				BucketName:      kb.StorageConfig.BucketName,
+				AccessKeyId:     kb.StorageConfig.SecretID,
+				SecretAccessKey: kb.StorageConfig.SecretKey,
+				AppId:           kb.StorageConfig.AppID,
+				PathPrefix:      kb.StorageConfig.PathPrefix,
+			},
+			VlmConfig: &proto.VLMConfig{
+				ModelName:     kb.VLMConfig.ModelName,
+				BaseUrl:       kb.VLMConfig.BaseURL,
+				ApiKey:        kb.VLMConfig.APIKey,
+				InterfaceType: kb.VLMConfig.InterfaceType,
+			},
 		},
 		RequestId: ctx.Value(types.RequestIDContextKey).(string),
 	})
@@ -780,7 +899,7 @@ func (s *knowledgeService) processChunks(ctx context.Context,
 						TenantID:        knowledge.TenantID,
 						KnowledgeID:     knowledge.ID,
 						KnowledgeBaseID: knowledge.KnowledgeBaseID,
-						Content:         fmt.Sprintf("图片OCR文本: %s", img.OcrText),
+						Content:         img.OcrText,
 						ChunkIndex:      maxSeq + i*100 + 1, // 使用不冲突的索引方式
 						IsEnabled:       true,
 						CreatedAt:       time.Now(),
@@ -802,7 +921,7 @@ func (s *knowledgeService) processChunks(ctx context.Context,
 						TenantID:        knowledge.TenantID,
 						KnowledgeID:     knowledge.ID,
 						KnowledgeBaseID: knowledge.KnowledgeBaseID,
-						Content:         fmt.Sprintf("图片描述: %s", img.Caption),
+						Content:         img.Caption,
 						ChunkIndex:      maxSeq + i*100 + 2, // 使用不冲突的索引方式
 						IsEnabled:       true,
 						CreatedAt:       time.Now(),
@@ -860,8 +979,7 @@ func (s *knowledgeService) processChunks(ctx context.Context,
 		} else {
 			for _, chunk := range textChunks {
 				chunk.RelationChunks, _ = json.Marshal(graphBuilder.GetRelationChunks(chunk.ID, relationChunkSize))
-				chunk.IndirectRelationChunks, _ =
-					json.Marshal(graphBuilder.GetIndirectRelationChunks(chunk.ID, indirectRelationChunkSize))
+				chunk.IndirectRelationChunks, _ = json.Marshal(graphBuilder.GetIndirectRelationChunks(chunk.ID, indirectRelationChunkSize))
 			}
 			for i, entity := range graphBuilder.GetAllEntities() {
 				relationChunks, _ := json.Marshal(entity.ChunkIDs)
@@ -1089,7 +1207,7 @@ func (s *knowledgeService) getSummary(ctx context.Context,
 		chunkContents = chunkContents + imageAnnotations
 	}
 
-	if len(chunkContents) < 30 {
+	if len(chunkContents) < 300 {
 		return chunkContents, nil
 	}
 
@@ -1386,6 +1504,12 @@ func (s *knowledgeService) UpdateImageInfo(ctx context.Context, knowledgeID stri
 
 	// Iterate through each chunk and update its content based on the image information
 	updateChunk := []*types.Chunk{chunk}
+	var addChunk []*types.Chunk
+
+	// Track whether we've found OCR and caption child chunks for this image
+	hasOCRChunk := false
+	hasCaptionChunk := false
+
 	for i, child := range chunkChildren {
 		// Skip chunks that are not image types
 		var cImageInfo []*types.ImageInfo
@@ -1403,18 +1527,68 @@ func (s *knowledgeService) UpdateImageInfo(ctx context.Context, knowledgeID stri
 			continue
 		}
 
-		// Update the chunk content based on the image type
-		if child.ChunkType == types.ChunkTypeImageCaption && image.Caption != cImageInfo[0].Caption {
-			child.Content = fmt.Sprintf("图片描述: %s", image.Caption)
-			child.ImageInfo = imageInfo
-			updateChunk = append(updateChunk, chunkChildren[i])
-		} else if child.ChunkType == types.ChunkTypeImageOCR && image.OCRText != cImageInfo[0].OCRText {
-			child.Content = fmt.Sprintf("图片OCR文本: %s", image.OCRText)
-			child.ImageInfo = imageInfo
-			updateChunk = append(updateChunk, chunkChildren[i])
+		// Mark that we've found chunks for this image
+		if child.ChunkType == types.ChunkTypeImageCaption {
+			hasCaptionChunk = true
+			// Update caption if it has changed
+			if image.Caption != cImageInfo[0].Caption {
+				child.Content = image.Caption
+				child.ImageInfo = imageInfo
+				updateChunk = append(updateChunk, chunkChildren[i])
+			}
+		} else if child.ChunkType == types.ChunkTypeImageOCR {
+			hasOCRChunk = true
+			// Update OCR if it has changed
+			if image.OCRText != cImageInfo[0].OCRText {
+				child.Content = image.OCRText
+				child.ImageInfo = imageInfo
+				updateChunk = append(updateChunk, chunkChildren[i])
+			}
 		}
 	}
+
+	// Create a new caption chunk if it doesn't exist and we have caption data
+	if !hasCaptionChunk && image.Caption != "" {
+		captionChunk := &types.Chunk{
+			ID:              uuid.New().String(),
+			TenantID:        tenantID,
+			KnowledgeID:     chunk.KnowledgeID,
+			KnowledgeBaseID: chunk.KnowledgeBaseID,
+			Content:         image.Caption,
+			ChunkType:       types.ChunkTypeImageCaption,
+			ParentChunkID:   chunk.ID,
+			ImageInfo:       imageInfo,
+		}
+		addChunk = append(addChunk, captionChunk)
+		logger.Infof(ctx, "Created new caption chunk ID: %s for image URL: %s", captionChunk.ID, image.OriginalURL)
+	}
+
+	// Create a new OCR chunk if it doesn't exist and we have OCR data
+	if !hasOCRChunk && image.OCRText != "" {
+		ocrChunk := &types.Chunk{
+			ID:              uuid.New().String(),
+			TenantID:        tenantID,
+			KnowledgeID:     chunk.KnowledgeID,
+			KnowledgeBaseID: chunk.KnowledgeBaseID,
+			Content:         image.OCRText,
+			ChunkType:       types.ChunkTypeImageOCR,
+			ParentChunkID:   chunk.ID,
+			ImageInfo:       imageInfo,
+		}
+		addChunk = append(addChunk, ocrChunk)
+		logger.Infof(ctx, "Created new OCR chunk ID: %s for image URL: %s", ocrChunk.ID, image.OriginalURL)
+	}
 	logger.Infof(ctx, "Updated %d chunks out of %d total chunks", len(updateChunk), len(chunkChildren)+1)
+
+	if len(addChunk) > 0 {
+		err := s.chunkService.CreateChunks(ctx, addChunk)
+		if err != nil {
+			logger.ErrorWithFields(ctx, err, map[string]interface{}{
+				"add_chunk_size": len(addChunk),
+			})
+			return err
+		}
+	}
 
 	// Update the chunks
 	for _, c := range updateChunk {
@@ -1429,7 +1603,7 @@ func (s *knowledgeService) UpdateImageInfo(ctx context.Context, knowledgeID stri
 	}
 
 	// Update the chunk vector
-	err = s.updateChunkVector(ctx, chunk.KnowledgeBaseID, updateChunk)
+	err = s.updateChunkVector(ctx, chunk.KnowledgeBaseID, append(updateChunk, addChunk...))
 	if err != nil {
 		logger.ErrorWithFields(ctx, err, map[string]interface{}{
 			"chunk_id":     chunk.ID,
@@ -1558,4 +1732,13 @@ func (s *knowledgeService) CloneChunk(ctx context.Context, src, dst *types.Knowl
 		return err
 	}
 	return nil
+}
+
+func IsImageType(fileType string) bool {
+	switch fileType {
+	case "jpg", "jpeg", "png", "gif", "webp", "bmp", "svg", "tiff":
+		return true
+	default:
+		return false
+	}
 }

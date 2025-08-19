@@ -1,10 +1,7 @@
 package handler
 
 import (
-	"errors"
 	"net/http"
-	"os"
-	"strconv"
 
 	"github.com/gin-gonic/gin"
 
@@ -51,40 +48,19 @@ func (h *TestDataHandler) GetTestData(c *gin.Context) {
 
 	logger.Info(ctx, "Start retrieving test data")
 
-	// Check if we're running in release/production mode
-	if gin.Mode() == gin.ReleaseMode {
-		logger.Warn(ctx, "Attempting to retrieve test data in production mode")
-		c.Error(errors.New("This API is only available in development mode"))
-		return
-	}
-
-	// Check if test data environment variables are configured
-	if os.Getenv("INIT_TEST_TENANT_ID") == "" || os.Getenv("INIT_TEST_KNOWLEDGE_BASE_ID") == "" {
-		logger.Warn(ctx, "Test data environment variables not set")
-		c.Error(errors.New("Test data not enabled"))
-		return
-	}
-
-	tenantID := os.Getenv("INIT_TEST_TENANT_ID")
-	logger.Debugf(ctx, "Test tenant ID environment variable: %s", tenantID)
-
-	tenantIDUint, err := strconv.ParseUint(tenantID, 10, 64)
-	if err != nil {
-		logger.Errorf(ctx, "Failed to parse tenant ID: %s", tenantID)
-		c.Error(err)
-		return
-	}
+	tenantID := uint(types.InitDefaultTenantID)
+	logger.Debugf(ctx, "Test tenant ID environment variable: %d", tenantID)
 
 	// Retrieve the test tenant data
-	logger.Infof(ctx, "Retrieving test tenant, ID: %d", tenantIDUint)
-	tenant, err := h.tenantService.GetTenantByID(ctx, uint(tenantIDUint))
+	logger.Infof(ctx, "Retrieving test tenant, ID: %d", tenantID)
+	tenant, err := h.tenantService.GetTenantByID(ctx, tenantID)
 	if err != nil {
 		logger.ErrorWithFields(ctx, err, nil)
 		c.Error(err)
 		return
 	}
 
-	knowledgeBaseID := os.Getenv("INIT_TEST_KNOWLEDGE_BASE_ID")
+	knowledgeBaseID := types.InitDefaultKnowledgeBaseID
 	logger.Debugf(ctx, "Test knowledge base ID environment variable: %s", knowledgeBaseID)
 
 	// Retrieve the test knowledge base data
